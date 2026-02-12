@@ -1,19 +1,16 @@
 const express = require('express');
-const { MongoClient } = require('mongodb');
+const mongoose = require('mongoose');
 const bcrypt = require('bcrypt');
+const User = require('./models/User');
+const GroupMessage = require('./models/GroupMessage');
 const app = express();
 const port = 3000;
 
-const mongoUri = 'mongodb+srv://nicholas:user@free-cluster.okjmx.mongodb.net/?appName=Free-Cluster';
-const client = new MongoClient(mongoUri);
+const mongoUri = 'mongodb+srv://nicholas:user@free-cluster.okjmx.mongodb.net/chatapp?appName=Free-Cluster';
 
-let db;
-client.connect().then(() => {
-  db = client.db('chatapp');
-  console.log('Connected to MongoDB');
-}).catch(err => {
-  console.error('MongoDB connection error:', err);
-});
+mongoose.connect(mongoUri)
+  .then(() => console.log('Connected to MongoDB'))
+  .catch(err => console.error('MongoDB connection error:', err));
 
 app.use(express.json());
 app.use(express.static(`public`));
@@ -26,29 +23,33 @@ app.post('/api/signup', async (req, res) => {
   try {
     const { username, firstname, lastname, password } = req.body;
 
-    // Check if username already exists
-    const existingUser = await db.collection('users').findOne({ username });
-    if (existingUser) {
-      return res.status(400).json({ error: 'Username already exists' });
-    }
-
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Create user document
-    const newUser = {
+    // Create user with Mongoose model
+    const newUser = new User({
       username,
       firstname,
       lastname,
-      password: hashedPassword,
-      createdon: new Date()
-    };
+      password: hashedPassword
+    });
 
-    // Insert into database
-    const result = await db.collection('users').insertOne(newUser);
-    res.status(201).json({ message: 'User created successfully', userId: result.insertedId });
+    await newUser.save();
+    res.status(201).json({ message: 'User created successfully', userId: newUser._id });
   } catch (error) {
     console.error('Signup error:', error);
+    
+    // Handle duplicate username error
+    if (error.code === 11000) {
+      return res.status(400).json({ error: 'Username already exists' });
+    }
+    
+    // Handle validation errors
+    if (error.name === 'ValidationError') {
+      const messages = Object.values(error.errors).map(err => err.message);
+      return res.status(400).json({ error: messages.join(', ') });
+    }
+    
     res.status(500).json({ error: 'Server error during signup' });
   }
 });
@@ -58,7 +59,7 @@ app.post('/api/login', async (req, res) => {
     const { username, password } = req.body;
 
     // Find user by username
-    const user = await db.collection('users').findOne({ username });
+    const user = await User.findOne({ username });
     if (!user) {
       return res.status(401).json({ error: 'Invalid username or password' });
     }
@@ -84,6 +85,17 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
+app.get('/api/messages/:room', async (req, res) => {
+  try {
+    const { room } = req.params;
+    const messages = await GroupMessage.find({ room }).sort({ date_sent: 1 }).limit(50);
+    res.status(200).json(messages);
+  } catch (error) {
+    console.error('Fetch messages error:', error);
+    res.status(500).json({ error: 'Server error fetching messages' });
+  }
+});
+
 const server = app.listen(port, () => {
   console.log(`Server is running on http://localhost:${port}`);
 });
@@ -102,9 +114,23 @@ serverIO.on('connection', (socket) => {
     console.log(`User joined room: ${room}`);
     });
     
-    socket.on('roomMessage', ({ room, message }) => {
-    console.log(`Received message for room ${room}: ${message}`);
-    socket.broadcast.to(room).emit('roomMessage', { sender: socket.id, message });
+    socket.on('roomMessage', async ({ room, message, username }) => {
+    console.log(`Received message for room ${room} from ${username}: ${message}`);
+    
+    // Save message to database
+    try {
+      const newMessage = new GroupMessage({
+        from_user: username || socket.id,
+        room,
+        message
+      });
+      await newMessage.save();
+      console.log('Message saved to database');
+    } catch (error) {
+      console.error('Error saving message:', error);
+    }
+    
+    socket.broadcast.to(room).emit('roomMessage', { sender: username || socket.id, message });
     });
 
     socket.on('leaveRoom', (room) => {
